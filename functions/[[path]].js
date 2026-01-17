@@ -143,11 +143,17 @@ OK: ${currentHost} (Running on Pages Functions)
       const only_connected = body.only_connected !== undefined ? Boolean(body.only_connected) : true;
 
       const idx = await getTgIndex(env, tg_id);
-      const profiles = await Promise.all(idx.profile_ids.map((id) => getProfile(env, id)));
 
-      let out = profiles
-        .filter(Boolean)
-        .map((p) => ({
+      // ✅ prune expired/deleted profiles from index (pending auto-clean)
+      const kept_ids = [];
+      const out = [];
+
+      for (const id of idx.profile_ids) {
+        const p = await getProfile(env, id);
+        if (!p) continue; // expired/deleted
+        kept_ids.push(id);
+
+        const item = {
           profile_id: p.profile_id,
           label: p.label,
 
@@ -160,18 +166,28 @@ OK: ${currentHost} (Running on Pages Functions)
           last_ok_at: p.last_ok_at,
           last_error: p.last_error,
           created_at: p.created_at,
-        }));
+        };
 
-      if (only_connected) {
-        out = out.filter((p) => p.has_refresh && p.channel_id);
+        out.push(item);
       }
+
+      if (kept_ids.length !== idx.profile_ids.length) {
+        idx.profile_ids = kept_ids;
+        if (idx.default_profile_id && !kept_ids.includes(idx.default_profile_id)) {
+          idx.default_profile_id = kept_ids[0] || null;
+        }
+        idx.updated_at = Date.now();
+        await env.KV.put(kTgIndex(tg_id), JSON.stringify(idx));
+      }
+
+      const filtered = only_connected ? out.filter((p) => p.has_refresh && p.channel_id) : out;
 
       return json(
         {
           ok: true,
           tg_id,
           default_profile_id: idx.default_profile_id || null,
-          profiles: out,
+          profiles: filtered,
         },
         200
       );
@@ -331,15 +347,23 @@ OK: ${currentHost} (Running on Pages Functions)
         return text("Authorization failed. Try again.", 400);
       }
 
-      const refresh_token = tokenJson.refresh_token || null;
-      if (!refresh_token) {
-        profile.last_error = "no_refresh_token_returned";
-        profile.updated_at = Date.now();
-        await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
-        return text("No refresh token returned. Revoke old grant and retry.", 400);
+      // ✅ IMPORTANT:
+      // Google may NOT return refresh_token on re-auth.
+      // If we already have one, keep it.
+      const got_refresh_token = tokenJson.refresh_token || null;
+
+      if (!got_refresh_token) {
+        if (!profile.refresh_token_enc) {
+          profile.last_error = "no_refresh_token_returned";
+          profile.updated_at = Date.now();
+          await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
+          return text("No refresh token returned. Revoke old grant and retry.", 400);
+        }
+        // keep existing refresh token
+      } else {
+        profile.refresh_token_enc = await encryptJson(env, { refresh_token: got_refresh_token });
       }
 
-      profile.refresh_token_enc = await encryptJson(env, { refresh_token });
       profile.last_ok_at = Date.now();
       profile.last_error = null;
       profile.updated_at = Date.now();
@@ -587,4 +611,4 @@ async function fetchChannelMine(accessToken) {
   } catch {
     return null;
   }
-                                          }
+}
