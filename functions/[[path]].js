@@ -38,8 +38,9 @@ OK: ${currentHost} (Running on Pages Functions)
     }
 
     // ============================================================
-    // ROUTE 2: Add profile + mint login link
+    // ROUTE 2: Add profile + mint login link (PENDING TTL auto-clean)
     // POST /api/profile/add
+    // Body: { tg_id, client_id, client_secret, label?, ttl_sec?, pending_ttl_sec? }
     // ============================================================
     if (path === "/api/profile/add" && request.method === "POST") {
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
@@ -50,8 +51,11 @@ OK: ${currentHost} (Running on Pages Functions)
       const client_secret = String(body.client_secret || "");
       const label = String(body.label || "").slice(0, 40);
 
-      // Default 10 minutes (600s). Min 60s, Max 600s.
+      // Ticket TTL (login link) — max 10 min
       const ttl_sec = clampInt(body.ttl_sec ?? 600, 60, 600);
+
+      // Pending Profile TTL — default 15 min, min 5 min, max 60 min
+      const pending_ttl_sec = clampInt(body.pending_ttl_sec ?? 900, 300, 3600);
 
       if (!tg_id || !client_id || !client_secret) {
         return json({ ok: false, err: "missing tg_id/client_id/client_secret" }, 400);
@@ -61,22 +65,30 @@ OK: ${currentHost} (Running on Pages Functions)
       const now = Date.now();
 
       const profile = {
-        ver: 2,
+        ver: 3,
         profile_id,
         tg_id,
         label: label || `profile-${profile_id.slice(0, 6)}`,
+
+        // full client_id needed for OAuth, but bot/UI should use hint
         client_id,
+        client_id_hint: maskMid(client_id, 8, 10),
+
         client_secret_enc: await encryptJson(env, { client_secret }),
+        client_secret_hint: maskSecret(client_secret),
+
         refresh_token_enc: null,
         channel_id: null,
         channel_title: null,
+
         created_at: now,
         updated_at: now,
         last_ok_at: null,
         last_error: null,
       };
 
-      await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
+      // ✅ Pending auto-clean: if user never authorizes, this profile will disappear
+      await env.KV.put(kProfile(profile_id), JSON.stringify(profile), { expirationTtl: pending_ttl_sec });
 
       const idx = await getTgIndex(env, tg_id);
       idx.profile_ids.push(profile_id);
@@ -84,18 +96,41 @@ OK: ${currentHost} (Running on Pages Functions)
       if (!idx.default_profile_id) idx.default_profile_id = profile_id;
       await env.KV.put(kTgIndex(tg_id), JSON.stringify(idx));
 
-      // Ticket payload includes nonce
       const ticket = await mintLoginTicket(env, { tg_id, profile_id, ttlSec: ttl_sec });
-
-      // ✅ FIX: Build dynamic login URL based on current Pages domain
       const login_url = `${protocol}//${currentHost}/oauth/start?t=${encodeURIComponent(ticket)}`;
+
+      return json({ ok: true, profile_id, ttl_sec, pending_ttl_sec, login_url }, 200);
+    }
+
+    // ============================================================
+    // ROUTE 2.5: Regenerate login link without creating new profile
+    // POST /api/profile/login_link
+    // Body: { tg_id, profile_id, ttl_sec?, force? }
+    // ============================================================
+    if (path === "/api/profile/login_link" && request.method === "POST") {
+      if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
+
+      const body = await request.json().catch(() => ({}));
+      const tg_id = String(body.tg_id || "");
+      const profile_id = String(body.profile_id || "");
+      const ttl_sec = clampInt(body.ttl_sec ?? 600, 60, 600);
+      const force = body.force ? 1 : 0;
+
+      if (!tg_id || !profile_id) return json({ ok: false, err: "missing tg_id/profile_id" }, 400);
+
+      const profile = await getProfile(env, profile_id);
+      if (!profile || profile.tg_id !== tg_id) return json({ ok: false, err: "profile_not_found" }, 404);
+
+      const ticket = await mintLoginTicket(env, { tg_id, profile_id, ttlSec: ttl_sec });
+      const login_url = `${protocol}//${currentHost}/oauth/start?t=${encodeURIComponent(ticket)}${force ? "&force=1" : ""}`;
 
       return json({ ok: true, profile_id, ttl_sec, login_url }, 200);
     }
 
     // ============================================================
-    // ROUTE 3: List profiles
+    // ROUTE 3: List profiles (default: only connected)
     // POST /api/profile/list
+    // Body: { tg_id, only_connected? }
     // ============================================================
     if (path === "/api/profile/list" && request.method === "POST") {
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
@@ -104,22 +139,32 @@ OK: ${currentHost} (Running on Pages Functions)
       const tg_id = String(body.tg_id || "");
       if (!tg_id) return json({ ok: false, err: "missing_tg_id" }, 400);
 
+      // default true: show only profiles that have refresh + channel_id
+      const only_connected = body.only_connected !== undefined ? Boolean(body.only_connected) : true;
+
       const idx = await getTgIndex(env, tg_id);
       const profiles = await Promise.all(idx.profile_ids.map((id) => getProfile(env, id)));
 
-      const out = profiles
+      let out = profiles
         .filter(Boolean)
         .map((p) => ({
           profile_id: p.profile_id,
           label: p.label,
-          client_id: p.client_id,
+
+          client_id_hint: p.client_id_hint || maskMid(p.client_id, 8, 10),
+          client_secret_hint: p.client_secret_hint || "****…****",
+
           has_refresh: Boolean(p.refresh_token_enc),
-          channel_id: p.channel_id,
-          channel_title: p.channel_title,
+          channel_id: p.channel_id || null,
+          channel_title: p.channel_title || null,
           last_ok_at: p.last_ok_at,
           last_error: p.last_error,
           created_at: p.created_at,
         }));
+
+      if (only_connected) {
+        out = out.filter((p) => p.has_refresh && p.channel_id);
+      }
 
       return json(
         {
@@ -181,29 +226,31 @@ OK: ${currentHost} (Running on Pages Functions)
 
     // ============================================================
     // ROUTE 6: OAuth Start (User Click)
-    // GET /oauth/start
+    // GET /oauth/start?t=... (&force=1 optional)
     // ============================================================
     if (path === "/oauth/start") {
       const t = String(url.searchParams.get("t") || "");
       if (!t) return text("Missing ticket", 400);
 
-      const vt = await verifyTicket(env, t); // verify only
+      const force = url.searchParams.get("force") === "1";
+
+      const vt = await verifyTicket(env, t);
       if (!vt.ok) return text(`Invalid/expired ticket: ${vt.err}`, 400);
 
       const profile = await getProfile(env, vt.profile_id);
       if (!profile || profile.tg_id !== vt.tg_id) return text("Profile not found", 404);
 
-      if (profile.refresh_token_enc) {
+      if (profile.refresh_token_enc && !force) {
         return html(
           `<html><body style="font-family:Arial">
 <h3>Already authorized ✅</h3>
-<p>This profile already has a token. Use bot → Re-auth if you want a fresh login.</p>
+<p>This profile already has a token.</p>
+<p>Use bot → Re-auth to force new consent.</p>
 </body></html>`,
           200
         );
       }
 
-      // ✅ FIX: Dynamic Redirect URI based on current Pages domain
       const redirect_uri = `${protocol}//${currentHost}/oauth/callback`;
 
       const scope = [
@@ -215,6 +262,7 @@ OK: ${currentHost} (Running on Pages Functions)
         tg_id: vt.tg_id,
         profile_id: vt.profile_id,
         ticket_nonce: vt.nonce,
+        force: force ? 1 : 0,
       });
 
       const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -244,11 +292,12 @@ OK: ${currentHost} (Running on Pages Functions)
       const tg_id = String(st.tg_id);
       const profile_id = String(st.profile_id);
       const ticket_nonce = String(st.ticket_nonce || "");
+      const force = Boolean(st.force);
 
       const profile = await getProfile(env, profile_id);
       if (!profile || profile.tg_id !== tg_id) return text("Profile not found", 404);
 
-      if (profile.refresh_token_enc) {
+      if (profile.refresh_token_enc && !force) {
         return html(
           `<html><body style="font-family:Arial">
 <h3>Already authorized ✅</h3>
@@ -259,8 +308,6 @@ OK: ${currentHost} (Running on Pages Functions)
       }
 
       const { client_secret } = await decryptJson(env, profile.client_secret_enc);
-
-      // ✅ FIX: Dynamic Redirect URI for token exchange
       const redirect_uri = `${protocol}//${currentHost}/oauth/callback`;
 
       const tokenResp = await fetch("https://oauth2.googleapis.com/token", {
@@ -270,7 +317,7 @@ OK: ${currentHost} (Running on Pages Functions)
           code,
           client_id: profile.client_id,
           client_secret,
-          redirect_uri: redirect_uri,
+          redirect_uri,
           grant_type: "authorization_code",
         }),
       });
@@ -303,9 +350,10 @@ OK: ${currentHost} (Running on Pages Functions)
         profile.channel_title = ch.channel_title;
       }
 
+      // ✅ Make profile "permanent": remove pending TTL by writing again without expiration
       await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
 
-      // Consume ticket nonce
+      // consume ticket nonce
       if (ticket_nonce) {
         await consumeTicketNonce(env, ticket_nonce);
       }
@@ -320,10 +368,9 @@ OK: ${currentHost} (Running on Pages Functions)
       );
     }
 
-    // Catch-all fallthrough
+    // Catch-all
     return text("Path not found", 404);
   } catch (e) {
-    // ✅ prevent Cloudflare 1101 for common errors
     return text(`Internal error: ${e && e.message ? e.message : String(e)}`, 500);
   }
 }
@@ -332,9 +379,15 @@ OK: ${currentHost} (Running on Pages Functions)
 // HELPERS
 // ============================================================
 
-function kTgIndex(tg_id) { return `tg:${tg_id}`; }
-function kProfile(profile_id) { return `p:${profile_id}`; }
-function kTicketNonce(nonce) { return `t:${nonce}`; }
+function kTgIndex(tg_id) {
+  return `tg:${tg_id}`;
+}
+function kProfile(profile_id) {
+  return `p:${profile_id}`;
+}
+function kTicketNonce(nonce) {
+  return `t:${nonce}`;
+}
 
 function clampInt(x, lo, hi) {
   const n = Number(x);
@@ -345,24 +398,29 @@ function clampInt(x, lo, hi) {
 function text(s, code = 200) {
   return new Response(s, { status: code, headers: { "content-type": "text/plain; charset=utf-8" } });
 }
-
 function html(s, code = 200) {
   return new Response(s, { status: code, headers: { "content-type": "text/html; charset=utf-8" } });
 }
-
 function json(obj, code = 200) {
   return new Response(JSON.stringify(obj), { status: code, headers: { "content-type": "application/json" } });
 }
 
-/**
- * ✅ Pages-safe authGuard:
- * - no throw
- * - returns boolean
- */
 function authGuard(req, secret) {
   const h = req.headers.get("authorization") || "";
-  const ok = h.startsWith("Bearer ") && h.slice(7) === String(secret || "");
-  return ok;
+  return h.startsWith("Bearer ") && h.slice(7) === String(secret || "");
+}
+
+// Mask helpers for bot/UI (no full secrets)
+function maskMid(s, head = 8, tail = 10) {
+  s = String(s || "");
+  if (s.length <= head + tail) return s;
+  return s.slice(0, head) + "…" + s.slice(-tail);
+}
+function maskSecret(s) {
+  s = String(s || "");
+  if (!s) return "****…****";
+  if (s.length <= 8) return "********";
+  return s.slice(0, 4) + "…" + s.slice(-4);
 }
 
 async function getTgIndex(env, tg_id) {
@@ -392,6 +450,7 @@ async function makeState(env, payload) {
     tg_id: String(payload.tg_id),
     profile_id: String(payload.profile_id),
     ticket_nonce: String(payload.ticket_nonce || ""),
+    force: payload.force ? 1 : 0,
     iat: Date.now(),
     nonce: crypto.randomUUID(),
   };
@@ -417,7 +476,7 @@ async function verifyState(env, state) {
   if (!obj.tg_id || !obj.profile_id || !obj.iat || !obj.ticket_nonce) return { ok: false };
   if (Date.now() - obj.iat > 10 * 60 * 1000) return { ok: false };
 
-  return { ok: true, tg_id: obj.tg_id, profile_id: obj.profile_id, ticket_nonce: obj.ticket_nonce };
+  return { ok: true, tg_id: obj.tg_id, profile_id: obj.profile_id, ticket_nonce: obj.ticket_nonce, force: obj.force === 1 };
 }
 
 async function hmacSign(keyB64, msg) {
@@ -528,4 +587,4 @@ async function fetchChannelMine(accessToken) {
   } catch {
     return null;
   }
-  }
+                                          }
