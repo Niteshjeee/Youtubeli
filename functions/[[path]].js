@@ -2,10 +2,6 @@
 
 const GOOGLE_META_VERIFICATION = "wKQAMhWWNs7wVEzhfTcFgt0GzpeHBrWX3JvQFf_NUBk";
 
-/**
- * Cloudflare Pages Functions Entry Point
- * Replaces 'export default { fetch }' from Workers
- */
 export async function onRequest(context) {
   try {
     const { request, env } = context;
@@ -38,24 +34,25 @@ OK: ${currentHost} (Running on Pages Functions)
     }
 
     // ============================================================
-    // ROUTE 2: Add profile + mint login link (PENDING TTL auto-clean)
+    // ROUTE 2: Add profile + mint login link (LONG-TERM STORE)
     // POST /api/profile/add
-    // Body: { tg_id, client_id, client_secret, label?, ttl_sec?, pending_ttl_sec? }
+    // Body: { tg_id, client_id, client_secret, label?, ttl_sec? }
+    //
+    // ✅ IMPORTANT:
+    // - profile stored permanently (no KV expiration)
+    // - only login link expires (ticket ttl)
     // ============================================================
     if (path === "/api/profile/add" && request.method === "POST") {
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
 
       const body = await request.json().catch(() => ({}));
-      const tg_id = String(body.tg_id || "");
-      const client_id = String(body.client_id || "");
-      const client_secret = String(body.client_secret || "");
-      const label = String(body.label || "").slice(0, 40);
+      const tg_id = String(body.tg_id || "").trim();
+      const client_id = String(body.client_id || "").trim();
+      const client_secret = String(body.client_secret || "").trim();
+      const label = String(body.label || "").slice(0, 40).trim();
 
       // Ticket TTL (login link) — max 10 min
       const ttl_sec = clampInt(body.ttl_sec ?? 600, 60, 600);
-
-      // Pending Profile TTL — default 15 min, min 5 min, max 60 min
-      const pending_ttl_sec = clampInt(body.pending_ttl_sec ?? 900, 300, 3600);
 
       if (!tg_id || !client_id || !client_secret) {
         return json({ ok: false, err: "missing tg_id/client_id/client_secret" }, 400);
@@ -65,7 +62,7 @@ OK: ${currentHost} (Running on Pages Functions)
       const now = Date.now();
 
       const profile = {
-        ver: 3,
+        ver: 4,
         profile_id,
         tg_id,
         label: label || `profile-${profile_id.slice(0, 6)}`,
@@ -87,11 +84,14 @@ OK: ${currentHost} (Running on Pages Functions)
         last_error: null,
       };
 
-      // ✅ Pending auto-clean: if user never authorizes, this profile will disappear
-      await env.KV.put(kProfile(profile_id), JSON.stringify(profile), { expirationTtl: pending_ttl_sec });
+      // ✅ store permanently (no expirationTtl)
+      await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
 
       const idx = await getTgIndex(env, tg_id);
-      idx.profile_ids.push(profile_id);
+
+      // ✅ avoid duplicates
+      if (!idx.profile_ids.includes(profile_id)) idx.profile_ids.push(profile_id);
+
       idx.updated_at = now;
       if (!idx.default_profile_id) idx.default_profile_id = profile_id;
       await env.KV.put(kTgIndex(tg_id), JSON.stringify(idx));
@@ -99,7 +99,7 @@ OK: ${currentHost} (Running on Pages Functions)
       const ticket = await mintLoginTicket(env, { tg_id, profile_id, ttlSec: ttl_sec });
       const login_url = `${protocol}//${currentHost}/oauth/start?t=${encodeURIComponent(ticket)}`;
 
-      return json({ ok: true, profile_id, ttl_sec, pending_ttl_sec, login_url }, 200);
+      return json({ ok: true, profile_id, ttl_sec, login_url }, 200);
     }
 
     // ============================================================
@@ -111,8 +111,8 @@ OK: ${currentHost} (Running on Pages Functions)
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
 
       const body = await request.json().catch(() => ({}));
-      const tg_id = String(body.tg_id || "");
-      const profile_id = String(body.profile_id || "");
+      const tg_id = String(body.tg_id || "").trim();
+      const profile_id = String(body.profile_id || "").trim();
       const ttl_sec = clampInt(body.ttl_sec ?? 600, 60, 600);
       const force = body.force ? 1 : 0;
 
@@ -136,7 +136,7 @@ OK: ${currentHost} (Running on Pages Functions)
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
 
       const body = await request.json().catch(() => ({}));
-      const tg_id = String(body.tg_id || "");
+      const tg_id = String(body.tg_id || "").trim();
       if (!tg_id) return json({ ok: false, err: "missing_tg_id" }, 400);
 
       // default true: show only profiles that have refresh + channel_id
@@ -144,16 +144,22 @@ OK: ${currentHost} (Running on Pages Functions)
 
       const idx = await getTgIndex(env, tg_id);
 
-      // ✅ prune expired/deleted profiles from index (pending auto-clean)
+      // ✅ dedupe ids (prevents KV extra reads)
+      const unique_ids = Array.from(new Set(idx.profile_ids || []));
+
+      // ✅ parallel KV fetch (faster)
+      const profs = await Promise.all(unique_ids.map((id) => getProfile(env, id)));
+
       const kept_ids = [];
       const out = [];
 
-      for (const id of idx.profile_ids) {
-        const p = await getProfile(env, id);
-        if (!p) continue; // expired/deleted
+      for (let i = 0; i < unique_ids.length; i++) {
+        const id = unique_ids[i];
+        const p = profs[i];
+        if (!p) continue; // deleted/missing
         kept_ids.push(id);
 
-        const item = {
+        out.push({
           profile_id: p.profile_id,
           label: p.label,
 
@@ -166,12 +172,18 @@ OK: ${currentHost} (Running on Pages Functions)
           last_ok_at: p.last_ok_at,
           last_error: p.last_error,
           created_at: p.created_at,
-        };
 
-        out.push(item);
+          // helpful for bot UI
+          is_default: idx.default_profile_id === p.profile_id,
+        });
       }
 
-      if (kept_ids.length !== idx.profile_ids.length) {
+      // ✅ prune stale ids + apply dedupe back to index
+      const changed =
+        kept_ids.length !== (idx.profile_ids || []).length ||
+        kept_ids.some((v, k) => v !== (idx.profile_ids || [])[k]);
+
+      if (changed) {
         idx.profile_ids = kept_ids;
         if (idx.default_profile_id && !kept_ids.includes(idx.default_profile_id)) {
           idx.default_profile_id = kept_ids[0] || null;
@@ -201,8 +213,8 @@ OK: ${currentHost} (Running on Pages Functions)
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
 
       const body = await request.json().catch(() => ({}));
-      const tg_id = String(body.tg_id || "");
-      const profile_id = String(body.profile_id || "");
+      const tg_id = String(body.tg_id || "").trim();
+      const profile_id = String(body.profile_id || "").trim();
       if (!tg_id || !profile_id) return json({ ok: false, err: "missing" }, 400);
 
       const idx = await getTgIndex(env, tg_id);
@@ -223,8 +235,8 @@ OK: ${currentHost} (Running on Pages Functions)
       if (!authGuard(request, env.BOT_BACKEND_KEY)) return text("Unauthorized", 401);
 
       const body = await request.json().catch(() => ({}));
-      const tg_id = String(body.tg_id || "");
-      const profile_id = String(body.profile_id || "");
+      const tg_id = String(body.tg_id || "").trim();
+      const profile_id = String(body.profile_id || "").trim();
       if (!tg_id || !profile_id) return json({ ok: false, err: "missing" }, 400);
 
       const idx = await getTgIndex(env, tg_id);
@@ -374,7 +386,6 @@ OK: ${currentHost} (Running on Pages Functions)
         profile.channel_title = ch.channel_title;
       }
 
-      // ✅ Make profile "permanent": remove pending TTL by writing again without expiration
       await env.KV.put(kProfile(profile_id), JSON.stringify(profile));
 
       // consume ticket nonce
