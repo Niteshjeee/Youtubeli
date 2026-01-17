@@ -1,6 +1,6 @@
 // PATH: functions/[[path]].js
 
-const GOOGLE_META_VERIFICATION = "ABUNthOKs_WUt8ZrOPhDg1y1DKmqh1OvBV0WpqInUg8";
+const GOOGLE_META_VERIFICATION = "wKQAMhWWNs7wVEzhfTcFgt0GzpeHBrWX3JvQFf_NUBk";
 
 /**
  * Cloudflare Pages Functions Entry Point
