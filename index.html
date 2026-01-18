@@ -1,34 +1,309 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YouTube Bot Backend</title>
-    <style>
-        body {
-            font-family: sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            background-color: #f0f0f0;
-            margin: 0;
-        }
-        .container {
-            text-align: center;
-            padding: 20px;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 { color: #333; }
-        p { color: #666; }
-    </style>
+  <meta charset="utf-8" />
+  <meta name="google-site-verification" content="wKQAMhWWNs7wVEzhfTcFgt0GzpeHBrWX3JvQFf_NUBk" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Authonyt • YouTube Upload Bot</title>
+
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --card: #121824;
+      --text: #e9eef7;
+      --muted: #a9b4c5;
+      --line: rgba(255,255,255,.10);
+      --accent: #7aa7ff;
+      --good: #46d19b;
+      --bad: #ff6b6b;
+      --warn: #ffd166;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f9fc;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --line: rgba(2,6,23,.10);
+        --accent: #2563eb;
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(1200px 500px at 20% 0%, rgba(122,167,255,.22), transparent 55%),
+                  radial-gradient(900px 400px at 90% 10%, rgba(70,209,155,.16), transparent 60%),
+                  var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 28px 18px 60px;
+    }
+    header {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      padding: 18px 0 10px;
+    }
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, rgba(122,167,255,.95), rgba(70,209,155,.90));
+      box-shadow: 0 12px 30px rgba(0,0,0,.22);
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.2px;
+    }
+    .sub {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .hero {
+      margin-top: 18px;
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--card) 92%, transparent);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 20px 50px rgba(0,0,0,.12);
+    }
+    .hero h2 {
+      margin: 0 0 8px;
+      font-size: 22px;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .card {
+      grid-column: span 12;
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--card) 92%, transparent);
+      border-radius: 16px;
+      padding: 16px;
+    }
+    @media (min-width: 900px) {
+      .card.col6 { grid-column: span 6; }
+      .card.col4 { grid-column: span 4; }
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+    }
+    .card ul {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 13px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      background: rgba(255,255,255,.02);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 99px;
+      background: var(--warn);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    .btn {
+      cursor: pointer;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.03);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-weight: 600;
+      font-size: 13px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .btn.primary {
+      border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+      background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 45%, transparent), rgba(255,255,255,.02));
+    }
+    .btn:active { transform: translateY(1px); }
+
+    .small {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: rgba(0,0,0,.12);
+      color: var(--text);
+    }
+    footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+  </style>
 </head>
+
 <body>
-    <div class="container">
-        <h1>Bot Backend is Running 🚀</h1>
-        <p>Your Cloudflare Pages Function is handling the logic.</p>
-    </div>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+          <h1>Authonyt</h1>
+          <p class="sub">YouTube Upload Bot • Cloudflare Pages</p>
+        </div>
+      </div>
+
+      <div class="actions">
+        <!-- Replace YOUR_BOT_USERNAME with your real bot username -->
+        <a class="btn primary" id="botLink" href="https://t.me/YOUR_BOT_USERNAME" target="_blank" rel="noreferrer">
+          Open Telegram Bot
+        </a>
+        <button class="btn" id="healthBtn" type="button">Check API</button>
+        <span class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">Checking…</span></span>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h2>Welcome</h2>
+      <p>
+        This site hosts the OAuth flow + backend endpoints for the Telegram bot.
+        Users connect their Google/YouTube account here, then upload from Telegram.
+      </p>
+      <p class="small">
+        Tip: if you only want the bot, tap <b>Open Telegram Bot</b>. If OAuth looks stuck, retry from the bot and allow popups.
+      </p>
+    </section>
+
+    <section class="grid">
+      <div class="card col6">
+        <h3>How users connect</h3>
+        <ul>
+          <li>User starts the bot and adds a profile (client id + secret).</li>
+          <li>Bot requests a short login link (ticket-based URL).</li>
+          <li>User authorizes Google → this site stores refresh token encrypted in KV.</li>
+          <li>Back in Telegram, uploads work using rotated/selected profiles.</li>
+        </ul>
+      </div>
+
+      <div class="card col6">
+        <h3>Security notes</h3>
+        <ul>
+          <li>Client secret + refresh token are stored encrypted using <code>MASTER_KEY_B64</code>.</li>
+          <li>Admin endpoints are protected by <code>BOT_BACKEND_KEY</code> or <code>HF_API_KEY</code>.</li>
+          <li>Login links are short-lived, one-time tickets.</li>
+          <li>Allowlist endpoints let you control who can use the bot.</li>
+        </ul>
+      </div>
+
+      <div class="card col4">
+        <h3>Quick links</h3>
+        <ul>
+          <li><code>/health</code> (status)</li>
+          <li><code>/oauth/start</code> (user)</li>
+          <li><code>/oauth/callback</code> (user)</li>
+        </ul>
+      </div>
+
+      <div class="card col4">
+        <h3>If something fails</h3>
+        <ul>
+          <li>Try bot → Re-auth (Google may not return refresh token on re-auth).</li>
+          <li>If token never comes, revoke app access in Google account and retry.</li>
+          <li>Check <code>/api/stats_today</code> (private) for errors.</li>
+        </ul>
+      </div>
+
+      <div class="card col4">
+        <h3>Owner mode</h3>
+        <ul>
+          <li>Use allow/disallow to control access.</li>
+          <li>Use list users/allowed to audit (keep protected!).</li>
+          <li>Rotate profiles per channel to avoid quota limits.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      <span id="hostInfo"></span>
+    </footer>
+  </div>
+
+  <script>
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const hostInfo = document.getElementById('hostInfo');
+    hostInfo.textContent = `Running on ${location.host}`;
+
+    function setStatus(kind, text) {
+      statusText.textContent = text;
+      if (kind === 'ok') statusDot.style.background = getComputedStyle(document.documentElement).getPropertyValue('--good');
+      else if (kind === 'bad') statusDot.style.background = getComputedStyle(document.documentElement).getPropertyValue('--bad');
+      else statusDot.style.background = getComputedStyle(document.documentElement).getPropertyValue('--warn');
+    }
+
+    async function ping() {
+      setStatus('warn', 'Checking…');
+      try {
+        const r = await fetch('/health', { cache: 'no-store' });
+        if (!r.ok) throw new Error('bad');
+        const j = await r.json();
+        setStatus('ok', j.ok ? 'API OK' : 'API error');
+      } catch {
+        setStatus('bad', 'API offline');
+      }
+    }
+
+    document.getElementById('healthBtn').addEventListener('click', ping);
+    ping();
+  </script>
 </body>
 </html>
